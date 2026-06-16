@@ -74,11 +74,13 @@ echo -e "${CYAN}Installing RLM library...${NC}"
 RLM_DIR="$HERMES_HOME/rlm"
 RLM_REPO="$RLM_DIR/repo"
 RLM_VENV="$RLM_DIR/.venv"
+PINNED_COMMIT="156fd72"
 
 mkdir -p "$RLM_DIR"
 
 if [ ! -d "$RLM_REPO" ]; then
     git clone https://github.com/alexzhang13/rlm.git "$RLM_REPO"
+    cd "$RLM_REPO" && git checkout "$PINNED_COMMIT" && cd - > /dev/null
 fi
 
 $PYTHON -m venv "$RLM_VENV"
@@ -100,6 +102,7 @@ fi
 cat >> "$ENV_FILE" <<EOF
 RLM_OPENAI_BASE_URL=$BASE_URL
 RLM_OPENAI_API_KEY=$API_KEY
+RLM_MODEL=$MODEL
 EOF
 
 echo -e "${GREEN}✓${NC} Environment configured"
@@ -124,19 +127,9 @@ echo -e "${GREEN}✓${NC} Plugin installed"
 # ─── Restart Hermes ──────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}Restarting Hermes...${NC}"
-
-if command -v hermes-ctl &>/dev/null; then
-    # Try to detect username from Hermes config
-    USERNAME=$(grep -oP 'name:\s*\K\S+' "$HERMES_HOME/config.yaml" 2>/dev/null | head -1 || echo "")
-    if [ -n "$USERNAME" ]; then
-        hermes-ctl restart "$USERNAME" 2>/dev/null || true
-    else
-        echo -e "${YELLOW}⚠${NC} Could not detect Hermes username. Restart manually:"
-        echo "  hermes-ctl restart YOUR_USERNAME"
-    fi
-else
-    echo -e "${YELLOW}⚠${NC} hermes-ctl not found. Restart Hermes manually."
-fi
+echo -e "${YELLOW}⚠${NC} Please restart Hermes manually to load the new plugin."
+echo "   If using systemd: sudo systemctl restart hermes-gateway-*.service"
+echo "   Or use your Hermes management tool (hermes-ctl, /restart command, etc.)"
 
 # ─── Done ────────────────────────────────────────────────────────────────────
 echo ""

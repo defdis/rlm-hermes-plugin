@@ -8,10 +8,15 @@ Requires: Python 3.11+, git, Hermes Agent installed
 import os
 import sys
 import subprocess
-import tempfile
 import shutil
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 
+# ─── Pinned RLM version (commit hash) ─────────────────────────────────────────
+RLM_REPO_URL = "https://github.com/alexzhang13/rlm.git"
+RLM_COMMIT = "156fd725411b9cae822f5920a6cbf102a5473baa"  # 2026-06-15
 
 # ─── Colors (Windows-safe) ───────────────────────────────────────────────────
 def green(s):  return f"\033[0;32m{s}\033[0m" if os.name != "nt" else s
@@ -53,16 +58,13 @@ def find_hermes_home():
     if home:
         return Path(home)
 
-    # Default locations
-    if os.name == "nt":  # Windows
+    if os.name == "nt":
         candidates = [
             Path(os.environ.get("USERPROFILE", "")) / ".hermes",
             Path(os.environ.get("HOMEDRIVE", "") + os.environ.get("HOMEPATH", "")) / ".hermes",
         ]
-    else:  # Linux/macOS
-        candidates = [
-            Path.home() / ".hermes",
-        ]
+    else:
+        candidates = [Path.home() / ".hermes"]
 
     for c in candidates:
         if (c / "config.yaml").exists():
@@ -78,6 +80,26 @@ def run(cmd, **kwargs):
         print(red(f"Command failed: {' '.join(cmd)}"))
         print(e.stderr)
         raise
+
+
+def validate_api(base_url: str, api_key: str, timeout: int = 10) -> bool:
+    """Quick validation that the API endpoint responds."""
+    url = base_url.rstrip("/") + "/models"
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+            count = len(data.get("data", data))
+            print(green("✓") + f" API OK — {count} models available")
+            return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:200]
+        print(red(f"API error: HTTP {e.code} — {body}"))
+        return False
+    except Exception as e:
+        print(red(f"API unreachable: {e}"))
+        return False
 
 
 def main():
@@ -120,8 +142,20 @@ def main():
     print("  vLLM:        http://your-server:8000/v1")
     print()
 
-    base_url = input("API Base URL: ").strip()
-    api_key = input("API Key: ").strip()
+    while True:
+        base_url = input("API Base URL: ").strip()
+        api_key = input("API Key: ").strip()
+        if not base_url or not api_key:
+            print(red("Both fields required."))
+            continue
+        print(cyan("Validating API..."))
+        if validate_api(base_url, api_key):
+            break
+        retry = input("Try again? [Y/n]: ").strip().lower()
+        if retry == "n":
+            print(red("Aborted."))
+            sys.exit(1)
+
     model = input("Model name [gpt-4o]: ").strip() or "gpt-4o"
 
     # ─── Install paths (inside Hermes home — survives reboots) ────────────────
@@ -129,12 +163,14 @@ def main():
     rlm_repo = rlm_dir / "repo"
     rlm_venv = rlm_dir / ".venv"
 
-    # ─── Install RLM library ─────────────────────────────────────────────────
+    # ─── Install RLM library (pinned commit) ─────────────────────────────────
     print()
     print(cyan("Installing RLM library..."))
 
     if not rlm_repo.exists():
-        run(["git", "clone", "https://github.com/alexzhang13/rlm.git", str(rlm_repo)])
+        run(["git", "clone", RLM_REPO_URL, str(rlm_repo)])
+        # Pin to specific commit
+        run(["git", "-C", str(rlm_repo), "checkout", RLM_COMMIT])
 
     # Create venv
     run([python, "-m", "venv", str(rlm_venv)])
@@ -146,7 +182,7 @@ def main():
         pip = str(rlm_venv / "bin" / "pip")
 
     run([pip, "install", "-q", "-e", str(rlm_repo)])
-    print(green("✓") + " RLM library installed")
+    print(green("✓") + " RLM library installed (pinned commit)")
 
     # ─── Configure environment ───────────────────────────────────────────────
     print()
@@ -154,14 +190,14 @@ def main():
 
     env_file = hermes_home / ".env"
 
-    # Read existing, remove old RLM lines
     lines = []
     if env_file.exists():
         lines = [l for l in env_file.read_text().splitlines()
-                 if not l.startswith("RLM_OPENAI_")]
+                 if not l.startswith("RLM_")]
 
     lines.append(f"RLM_OPENAI_BASE_URL={base_url}")
     lines.append(f"RLM_OPENAI_API_KEY={api_key}")
+    lines.append(f"RLM_MODEL={model}")
     env_file.write_text("\n".join(lines) + "\n")
     print(green("✓") + " Environment configured")
 
@@ -172,7 +208,6 @@ def main():
     plugin_dir = hermes_home / "plugins" / "rlm"
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find plugin source (next to this script)
     script_dir = Path(__file__).parent.resolve()
     plugin_src = script_dir / "plugin" / "__init__.py"
 
@@ -187,27 +222,9 @@ def main():
     # ─── Restart Hermes ──────────────────────────────────────────────────────
     print()
     print(cyan("Restarting Hermes..."))
-
-    hermes_ctl = shutil.which("hermes-ctl")
-    if hermes_ctl:
-        # Try to detect username
-        config = hermes_home / "config.yaml"
-        username = None
-        if config.exists():
-            for line in config.read_text().splitlines():
-                if line.strip().startswith("name:"):
-                    username = line.split(":", 1)[1].strip().strip('"').strip("'")
-                    break
-        if username:
-            try:
-                subprocess.run([hermes_ctl, "restart", username], timeout=30)
-                print(green("✓") + " Hermes restarted")
-            except Exception:
-                print(yellow("⚠") + f" Restart manually: hermes-ctl restart {username}")
-        else:
-            print(yellow("⚠") + " Restart manually: hermes-ctl restart YOUR_USERNAME")
-    else:
-        print(yellow("⚠") + " hermes-ctl not found. Restart Hermes manually.")
+    print(yellow("⚠") + " Please restart Hermes manually to load the new plugin.")
+    print("   If using systemd: sudo systemctl restart hermes-gateway-*.service")
+    print("   Or use your Hermes management tool (hermes-ctl, /restart command, etc.)")
 
     # ─── Done ────────────────────────────────────────────────────────────────
     print()
@@ -224,7 +241,7 @@ def main():
         print(f"  rmdir /s {rlm_repo}")
     else:
         print(f"  rm -rf {plugin_dir} {rlm_venv.parent} {rlm_repo}")
-    print(f"  # Remove RLM_OPENAI_* lines from {env_file}")
+    print(f"  # Remove RLM_* lines from {env_file}")
     print()
 
 

@@ -18,6 +18,9 @@
 - **Инструмент `rlm_complete`:** агент вызывает когда нужен глубокий анализ
 - **Для:** больших документов, сравнения файлов, задач где нельзя ошибиться
 - **Не для:** коротких файлов, простых фактов, механических задач
+- **Валидация API при установке:** проверяет что endpoint отвечает до записи в .env
+- **Фиксированная версия RLM:** pinned commit, не сломается от обновлений upstream
+- **Тесты:** `python3 test.py` — проверяет всё после установки
 
 ---
 
@@ -87,11 +90,26 @@ python install.py
 The installer will:
 1. Check Python 3.11+, git, and Hermes
 2. Ask for your API credentials (any OpenAI-compatible endpoint)
-3. Clone and install the RLM library
-4. Create the Hermes plugin
-5. Restart Hermes
+3. **Validate the API** — checks endpoint responds before saving
+4. Clone and install the RLM library (**pinned commit** — won't break on upstream updates)
+5. Create the Hermes plugin
+6. Restart Hermes
 
 **Cross-platform:** works on Linux, macOS, and Windows. No bash required.
+
+---
+
+## Verify
+
+After install, run the smoke test:
+
+```bash
+python3 test.py
+```
+
+Or ask your agent: **"Compare RAG and RLM in 3 bullet points."**
+
+If it responds meaningfully — it works.
 
 ---
 
@@ -119,18 +137,20 @@ The installer will:
 
 ## Manual Install
 
-### 1. Install RLM library
+### 1. Install RLM library (pinned commit)
 
 ```bash
 # Linux / macOS
 mkdir -p ~/.hermes/rlm
 git clone https://github.com/alexzhang13/rlm.git ~/.hermes/rlm/repo
+git -C ~/.hermes/rlm/repo checkout 156fd725411b9cae822f5920a6cbf102a5473baa
 python3.12 -m venv ~/.hermes/rlm/.venv
 ~/.hermes/rlm/.venv/bin/pip install -e ~/.hermes/rlm/repo
 
 # Windows
 mkdir %USERPROFILE%\.hermes\rlm
 git clone https://github.com/alexzhang13/rlm.git %USERPROFILE%\.hermes\rlm\repo
+git -C %USERPROFILE%\.hermes\rlm\repo checkout 156fd725411b9cae822f5920a6cbf102a5473baa
 python -m venv %USERPROFILE%\.hermes\rlm\.venv
 %USERPROFILE%\.hermes\rlm\.venv\Scripts\pip install -e %USERPROFILE%\.hermes\rlm\repo
 ```
@@ -142,6 +162,7 @@ Add to `~/.hermes/.env`:
 ```bash
 RLM_OPENAI_BASE_URL=https://your-api-endpoint/v1
 RLM_OPENAI_API_KEY=your_api_key_here
+RLM_MODEL=gpt-4o
 ```
 
 ### 3. Create plugin
@@ -153,17 +174,11 @@ cp plugin/__init__.py ~/.hermes/plugins/rlm/__init__.py
 
 ### 4. Restart Hermes
 
-```bash
-hermes-ctl restart YOUR_USERNAME
-```
+Restart your Hermes agent so it loads the new plugin:
 
----
-
-## Verify
-
-Ask your agent: **"Compare RAG and RLM in 3 bullet points."**
-
-If it responds meaningfully — it works.
+- **If Hermes runs as a service:** `systemctl --user restart hermes-gateway-*.service`
+- **If Hermes runs in terminal:** stop it (Ctrl+C) and start again
+- **Or from within Hermes chat:** send `/restart` command
 
 ---
 
@@ -176,6 +191,8 @@ The plugin registers a `rlm_complete` tool in Hermes. When called:
 3. The model recursively explores: reads, asks sub-questions, cross-references
 4. Returns a synthesized answer
 
+**Security:** prompt is passed via stdin as JSON — safe from injection. No string escaping into Python code.
+
 ---
 
 ## Notes
@@ -185,6 +202,9 @@ The plugin registers a `rlm_complete` tool in Hermes. When called:
 - `model_name` in `backend_kwargs` is required
 - `result.response` (not `.answer`) contains the final answer
 - Works with any OpenAI-compatible endpoint
+- **Pinned RLM commit:** `156fd72` — won't break on upstream API changes
+- **API validated at install time** — catches bad credentials before they hit .env
+- **Timeout default 300s** (5 min) — increase for very complex tasks
 
 ---
 
@@ -198,8 +218,8 @@ rm -rf ~/.hermes/plugins/rlm/ ~/.hermes/rlm/
 rmdir /s %USERPROFILE%\.hermes\plugins\rlm
 rmdir /s %USERPROFILE%\.hermes\rlm
 
-# Remove RLM_OPENAI_* lines from ~/.hermes/.env
-hermes-ctl restart YOUR_USERNAME
+# Remove RLM_* lines from ~/.hermes/.env
+# Restart Hermes: systemctl --user restart hermes-gateway-*.service, or /restart in chat
 ```
 
 ---

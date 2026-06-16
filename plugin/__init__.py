@@ -3,79 +3,103 @@ RLM Plugin for Hermes — Recursive Language Model.
 
 Provides rlm_complete: recursive task solving where the model
 reads files, explores sub-questions, and cross-references on its own.
+
+Cross-platform: Linux, macOS, Windows.
 """
 
 import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 
-def _get_rlm_paths():
-    """Resolve RLM venv and repo paths from Hermes home."""
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    rlm_dir = hermes_home / "rlm"
-    rlm_venv = rlm_dir / ".venv"
-    rlm_repo = rlm_dir / "repo"
-
-    # Python executable (cross-platform)
-    if os.name == "nt":
-        rlm_python = rlm_venv / "Scripts" / "python.exe"
-    else:
-        rlm_python = rlm_venv / "bin" / "python"
-
-    return rlm_venv, rlm_repo, str(rlm_python)
+def _find_rlm_python() -> str | None:
+    """Find RLM venv Python across platforms."""
+    hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    candidates = [
+        os.path.join(hermes_home, "rlm", ".venv", "bin", "python"),       # Linux/macOS
+        os.path.join(hermes_home, "rlm", ".venv", "bin", "python3"),      # Linux/macOS alt
+        os.path.join(hermes_home, "rlm", ".venv", "Scripts", "python.exe"), # Windows
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
 
 
-RLM_VENV, RLM_REPO, RLM_PYTHON = _get_rlm_paths()
+def _call_rlm(
+    prompt: str,
+    root_prompt: str | None = None,
+    model: str | None = None,
+    max_iterations: int = 10,
+    timeout: int = 300,
+) -> dict:
+    """Call RLM completion via subprocess. Prompt passed via stdin (safe from injection)."""
+    rlm_python = _find_rlm_python()
+    if not rlm_python:
+        return {"success": False, "error": "RLM venv not found. Run install.py first."}
 
-
-def _call_rlm(prompt: str, root_prompt: str | None = None, model: str = "deepseek-v4-pro", max_iterations: int = 10, timeout: int = 180) -> dict:
-    """Call RLM completion via subprocess."""
     base_url = os.environ.get("RLM_OPENAI_BASE_URL", "")
     api_key = os.environ.get("RLM_OPENAI_API_KEY", "")
-
     if not base_url or not api_key:
-        return {"success": False, "error": "RLM_OPENAI_BASE_URL and RLM_OPENAI_API_KEY must be set"}
+        return {"success": False, "error": "RLM_OPENAI_BASE_URL and RLM_OPENAI_API_KEY must be set in ~/.hermes/.env"}
 
-    # Escape prompt for safe embedding in Python string
-    prompt_escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    root_escaped = (root_prompt or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    # Use model from env if not specified
+    if not model:
+        model = os.environ.get("RLM_MODEL", "gpt-4o")
 
-    script = f'''
-import json, sys
-sys.path.insert(0, "{RLM_REPO}")
+    # Build payload as JSON — safe from injection
+    payload = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "max_iterations": max_iterations,
+        "timeout": timeout,
+        "prompt": prompt,
+        "root_prompt": root_prompt or "",
+    }
+
+    # Script that reads JSON from stdin, runs RLM, prints JSON result
+    script = r'''
+import json, sys, os
+sys.path.insert(0, os.path.expanduser("~/.hermes/rlm/repo"))
 from rlm import RLM
+
+data = json.load(sys.stdin)
 
 rlm = RLM(
     backend="openai",
-    backend_kwargs={{"base_url": "{base_url}", "api_key": "{api_key}", "model_name": "{model}"}},
-    max_iterations={max_iterations},
-    max_timeout={timeout},
+    backend_kwargs={
+        "base_url": data["base_url"],
+        "api_key": data["api_key"],
+        "model_name": data["model"],
+    },
+    max_iterations=data["max_iterations"],
+    max_timeout=data["timeout"],
     verbose=False,
 )
 
 result = rlm.completion(
-    prompt="{prompt_escaped}",
-    root_prompt="{root_escaped}" if "{root_escaped}" else None,
+    prompt=data["prompt"],
+    root_prompt=data["root_prompt"] if data["root_prompt"] else None,
 )
-# result is RLMChatCompletion — extract response
 answer = result.response if hasattr(result, "response") else str(result)
-print(json.dumps({{"answer": answer}}, ensure_ascii=False))
+print(json.dumps({"answer": answer}, ensure_ascii=False))
 '''
 
     try:
         proc = subprocess.run(
-            [RLM_PYTHON, "-c", script],
-            capture_output=True, text=True, timeout=timeout + 30,
-            env={**os.environ, "PYTHONPATH": str(RLM_REPO)},
+            [rlm_python, "-c", script],
+            input=json.dumps(payload),
+            capture_output=True, text=True,
+            timeout=timeout + 60,  # extra buffer for RLM overhead
+            env={**os.environ, "PYTHONPATH": os.path.expanduser("~/.hermes/rlm/repo")},
         )
         if proc.returncode != 0:
             return {"success": False, "error": proc.stderr.strip() or "RLM failed"}
         return {"success": True, "result": json.loads(proc.stdout.strip())}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"RLM timed out after {timeout}s"}
+        return {"success": False, "error": f"RLM timed out after {timeout}s. Try reducing max_iterations or increasing timeout."}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -100,8 +124,7 @@ def register(ctx):
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model for RLM. Default: deepseek-v4-pro.",
-                        "default": "deepseek-v4-pro"
+                        "description": "Model for RLM. Default: from RLM_MODEL env var, or gpt-4o."
                     },
                     "max_iterations": {
                         "type": "integer",
@@ -110,8 +133,8 @@ def register(ctx):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Max seconds. Default 180.",
-                        "default": 180
+                        "description": "Max seconds. Default 300 (5 min). Increase for very complex tasks.",
+                        "default": 300
                     }
                 },
                 "required": ["prompt"]
@@ -120,16 +143,9 @@ def register(ctx):
         handler=lambda params, **kw: json.dumps(_call_rlm(
             prompt=params.get("prompt"),
             root_prompt=params.get("root_prompt"),
-            model=params.get("model", "deepseek-v4-pro"),
+            model=params.get("model"),
             max_iterations=params.get("max_iterations", 10),
-            timeout=params.get("timeout", 180),
+            timeout=params.get("timeout", 300),
         )),
         description="Recursive task solving — reads files, spawns sub-questions, cross-references. For complex analysis where completeness matters.",
     )
-
-    def on_tool_call(**kwargs):
-        tool_name = kwargs.get("tool_name", "")
-        if tool_name == "rlm_complete":
-            print(f"[rlm] rlm_complete called", file=sys.stderr)
-
-    ctx.register_hook("post_tool_call", on_tool_call)
